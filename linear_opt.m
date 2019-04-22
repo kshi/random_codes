@@ -1,0 +1,11 @@
+margin = 0.1;
+lambda = 0.001;
+[n, d] = size(X);
+N = double(max(Y));
+E = bsxfun(@eq, Y(:), 1:N);
+W = inv(X'*X + lambda * eye(d,d)) * X' * E;
+num_samples = 10000;
+Z = [ones(1, num_samples); -1*ones(1, num_samples); sign(rand(N-2, num_samples) - 0.5)];
+A = W * Z;
+mu = mean(A, 2);
+deltas = mu'*A;

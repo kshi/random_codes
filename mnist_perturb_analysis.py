@@ -41,6 +41,7 @@ DATA_AUG = 6
 NB_EPOCHS_S = 10
 LMBDA = .1
 AUG_BATCH_SIZE = 512
+TARGET = 0
 
 
 def setup_tutorial():
@@ -252,34 +253,28 @@ def mnist_blackbox(train_start=0, train_end=60000, test_start=0,
                             rng, nb_classes, img_rows, img_cols, nchannels)
   model, bbox_preds, accuracies['bbox'] = prep_bbox_out
 
-  # Train substitute using method from https://arxiv.org/abs/1602.02697
-  print("Training the substitute model.")
-  train_sub_out = train_sub(sess, x, y, bbox_preds, x_sub, y_sub,
-                            nb_classes, nb_epochs_s, batch_size,
-                            learning_rate, data_aug, lmbda, aug_batch_size,
-                            rng, img_rows, img_cols, nchannels)
-  model_sub, preds_sub = train_sub_out
-
-  # Evaluate the substitute model on clean test examples
-  eval_params = {'batch_size': batch_size}
-  acc = model_eval(sess, x, y, preds_sub, x_test, y_test, args=eval_params)
-  accuracies['sub'] = acc
-
-  # Initialize the Fast Gradient Sign Method (FGSM) attack object.
-  fgsm = FastGradientMethod(model_sub, sess=sess)
-
-  # Craft adversarial examples using the substitute
-  eval_params = {'batch_size': batch_size}
+  # List of adversarial example graphs for each target class
   x_adv_sub = []
-  for target in range(10):
-    ind = np.zeros([1,10])
-    ind[target] = 1
+
+  for target in range(nb_classes):
+    # Train substitute using method from https://arxiv.org/abs/1602.02697  
+    print("Training the substitute model for target class " + str(target))
+    train_sub_out = train_sub(sess, x, y, bbox_preds, x_sub, y_sub,
+                              nb_classes, nb_epochs_s, batch_size,
+                              learning_rate, data_aug, lmbda, aug_batch_size,
+                              rng, img_rows, img_cols, nchannels)
+    model_sub, preds_sub = train_sub_out
+
+    # Craft adversarial examples using the substitute
+    fgsm = FastGradientMethod(model_sub, sess=sess)
+    ind = np.zeros([len(y_test),nb_classes])
+    ind[:, target] = 1
     fgsm_par = {'eps': 0.3, 'ord': np.inf, 'clip_min': 0., 'clip_max': 1.,
                 'targeted':True, 'y':tf.constant(ind)}
     x_adv_sub.append(fgsm.generate(x, **fgsm_par))
 
   # Train random binary classifiers to evaluate the perturbations.
-  num_perturb_samples = 10
+  num_perturb_samples = 400
   num_adv_samples = len(x_test)
   nb_filters = 64
   train_params = {
@@ -287,31 +282,32 @@ def mnist_blackbox(train_start=0, train_end=60000, test_start=0,
       'batch_size': batch_size,
       'learning_rate': learning_rate
   }
-  D = np.zeros((num_adv_samples, num_perturb_samples * 10))
-  Y = np.zeros((num_perturb_samples, 10))
+  np.savetxt("results/mnist_test_labels.csv", y_test, delimiter=",", fmt='%i')
+  
   for i in range(num_perturb_samples):
-    for target in range(10):
-      print('Training random model ' + str(i))
-      by = tf.placeholder(tf.float32, shape=(None, 2))
-      binary_model = ModelBasicCNN('binary_model_' + str(i), 2, nb_filters)
-      binary_loss = CrossEntropy(binary_model, smoothing=0.1)
+    print('Training random model ' + str(i))
+    by = tf.placeholder(tf.float32, shape=(None, 2))
+    binary_model = ModelBasicCNN('binary_model_' + str(i), 2, nb_filters)
+    binary_loss = CrossEntropy(binary_model, smoothing=0.1)   
+    rand_split = np.random.randint(0, 2, size=nb_classes)
+    with open("results/mnist_splits.csv", "a") as outfile:
+      np.savetxt(outfile, rand_split.reshape(1, nb_classes), delimiter=",", fmt='%i')
+    
+    indicators = np.inner(y_train, rand_split)
+    y_train_binary = np.vstack((indicators, 1 - indicators)).T
+    train(sess, binary_loss, x_train, y_train_binary, args=train_params)
 
-      rand_split = np.random.randint(0, 2, size=10)
-      Y[i, :] = rand_split
-      indicators = np.inner(y_train, rand_split)
-      y_train_binary = np.vstack((indicators, 1 - indicators)).T
-      train(sess, binary_loss, x_train, y_train_binary, args=train_params)
+    orig_preds = binary_model.get_logits(x)
+    orig_probs = tf.nn.softmax(orig_preds)[:, 0]
+    original = sess.run(orig_probs, feed_dict = {x: x_test})
       
-      orig_preds = binary_model.get_logits(x)
-      perturb_preds = binary_model.get_logits(x_adv_sub)
-      orig_probs = tf.nn.softmax(orig_preds)[:, 0]
+    for target in range(nb_classes):
+      perturb_preds = binary_model.get_logits(x_adv_sub[target])
       perturb_probs = tf.nn.softmax(perturb_preds)[:, 0]
-      original, perturbed = sess.run([orig_probs, perturb_probs], feed_dict = {x: x_test})
+      perturbed = sess.run(perturb_probs, feed_dict = {x: x_test})
       print('Average magnitude score change: ' + str(np.mean(np.abs(perturbed - original))))
-      D[:, i] = (perturbed - original)
-  np.savetxt("results/substitute_perturbations.csv", D, delimiter=",")
-  np.savetxt("results/random_splits.csv", Y, delimiter=",")
-  np.savetxt("results/test_labels.csv", y_test, delimiter=",")
+      with open("results/mnist_perturbations.csv", "a") as outfile:
+        np.savetxt(outfile, (perturbed - original).reshape(1, num_adv_samples), delimiter=",", fmt='%.5f')
 
   return accuracies
 
@@ -330,6 +326,8 @@ def main(argv=None):
 if __name__ == '__main__':
 
   # General flags
+  flags.DEFINE_integer('target', TARGET,
+                       'Target class for adversary')
   flags.DEFINE_integer('nb_classes', NB_CLASSES,
                        'Number of classes in problem')
   flags.DEFINE_integer('batch_size', BATCH_SIZE,

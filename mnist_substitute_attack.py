@@ -21,14 +21,12 @@ from cleverhans.attacks import FastGradientMethod
 from cleverhans.attacks_tf import jacobian_graph, jacobian_augmentation
 from cleverhans.dataset import MNIST
 from cleverhans.initializers import HeReLuNormalInitializer
-from cleverhans.loss import CrossEntropy, Loss
+from cleverhans.loss import CrossEntropy
 from cleverhans.model import Model
 from cleverhans.train import train
-from cleverhans.compat import softmax_cross_entropy_with_logits
 from cleverhans.utils import set_log_level
 from cleverhans.utils import TemporaryLogLevel
 from cleverhans.utils import to_categorical
-from cleverhans.utils import safe_zip
 from cleverhans.utils_tf import model_eval, batch_eval
 
 from cleverhans_tutorials.tutorial_models import ModelBasicCNN
@@ -59,41 +57,6 @@ def setup_tutorial():
   return True
 
 
-class WeightedCrossEntropy(Loss):
-  def __init__(self, model, smoothing=0., attack=None, pass_y=False,
-               adv_coeff=0.5, attack_params=None,
-               **kwargs):
-    if smoothing < 0 or smoothing > 1:
-      raise ValueError('Smoothing must be in [0, 1]', smoothing)
-    self.kwargs = kwargs
-    Loss.__init__(self, model, locals(), attack)
-    self.smoothing = smoothing
-    self.adv_coeff = adv_coeff
-    self.pass_y = pass_y
-    self.attack_params = attack_params
-    self.weights = kwargs['label_weights']
-    self.code = tf.constant((np.sign(self.weights) + 1) / 2, dtype=tf.float32)
-    self.abs_weights = tf.constant(np.abs(self.weights), dtype=tf.float32)
-    
-  def fprop(self, x, y, **kwargs):
-    kwargs.update(self.kwargs)
-    numerical_label = tf.argmax(y, axis=1)
-    y_binary = tf.gather(self.code, numerical_label)
-    yt = tf.stack([y_binary, 1-y_binary], axis=1)
-    w = tf.gather(self.abs_weights, numerical_label)
-
-    try:
-      yt -= self.smoothing * (yt - 1. / tf.cast(yt.shape[-1], yt.dtype))
-    except RuntimeError:
-      yt.assign_sub(self.smoothing * (yt - 1. / tf.cast(yt.shape[-1],
-                                                        yt.dtype)))
-
-    logit = self.model.get_logits(x, **kwargs)
-    #loss = tf.reduce_mean(softmax_cross_entropy_with_logits(labels=yt, logits=logit))
-    loss = tf.reduce_mean(tf.multiply(w, softmax_cross_entropy_with_logits(labels=yt, logits=logit)))
-    return loss
-
-
 def prep_bbox(sess, x, y, x_train, y_train, x_test, y_test,
               nb_epochs, batch_size, learning_rate,
               rng, nb_codewords, nb_classes=10, img_rows=28, img_cols=28, nchannels=1):
@@ -115,15 +78,14 @@ def prep_bbox(sess, x, y, x_train, y_train, x_test, y_test,
   """
 
   # Define TF model graph (for the black-box model)
-  nb_filters = 128
-  gaussian_codewords = np.random.normal(loc=0, scale=1, size=(nb_classes, nb_codewords))
-  codewords = (np.sign(gaussian_codewords) + 1) / 2
-  df_class_codewords = pd.DataFrame(gaussian_codewords)
+  nb_filters = 64
+  codewords = np.random.randint(0, 2, (nb_classes, nb_codewords))
+  df_class_codewords = pd.DataFrame(codewords)
   df_class_codewords.to_csv("results/{0}_class_codewords.csv".format(nb_codewords))
   tf_codewords = tf.convert_to_tensor(codewords, tf.float32)
   model = [ModelBasicCNN('model' + str(i), 2, nb_filters)
            for i in range(nb_codewords)]
-  loss = [WeightedCrossEntropy(model[i], smoothing=0.1, label_weights=gaussian_codewords[:, i])
+  loss = [CrossEntropy(model[i], smoothing=0.1)
           for i in range(nb_codewords)]
   binary_probabilities = [tf.nn.softmax(model[i].get_logits(x))[:, 0]
                           for i in range(nb_codewords)]
@@ -140,10 +102,11 @@ def prep_bbox(sess, x, y, x_train, y_train, x_test, y_test,
       'batch_size': batch_size,
       'learning_rate': learning_rate
   }
-
   for i in range(nb_codewords):
     print('Training binary filter {0} of {1}'.format(i+1, nb_codewords))
-    train(sess, loss[i], x_train, y_train, args=train_params, rng=rng)
+    indicators = np.inner(y_train, codewords[:, i])
+    y_train_binary = np.vstack((indicators, 1 - indicators)).T
+    train(sess, loss[i], x_train, y_train_binary, args=train_params, rng=rng)
 
   # Print out the accuracy on legitimate data
   eval_params = {'batch_size': batch_size}

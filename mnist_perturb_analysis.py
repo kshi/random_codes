@@ -219,7 +219,7 @@ def mnist_blackbox(train_start=0, train_end=60000, test_start=0,
   sess = tf.Session()
 
   # Get MNIST data
-  MNIST = mnist(train_start=train_start, train_end=train_end,
+  mnist = MNIST(train_start=train_start, train_end=train_end,
                 test_start=test_start, test_end=test_end)
   x_train, y_train = mnist.get_set('train')
   x_test, y_test = mnist.get_set('test')
@@ -275,7 +275,7 @@ def mnist_blackbox(train_start=0, train_end=60000, test_start=0,
     ind = np.zeros([1,10])
     ind[target] = 1
     fgsm_par = {'eps': 0.3, 'ord': np.inf, 'clip_min': 0., 'clip_max': 1.,
-                'targeted'=True, 'y'=tf.constant(ind)}
+                'targeted':True, 'y':tf.constant(ind)}
     x_adv_sub.append(fgsm.generate(x, **fgsm_par))
 
   # Train random binary classifiers to evaluate the perturbations.
@@ -291,7 +291,7 @@ def mnist_blackbox(train_start=0, train_end=60000, test_start=0,
   Y = np.zeros((num_perturb_samples, 10))
   for i in range(num_perturb_samples):
     for target in range(10):
-      print('Training random model ' + str(i))1
+      print('Training random model ' + str(i))
       by = tf.placeholder(tf.float32, shape=(None, 2))
       binary_model = ModelBasicCNN('binary_model_' + str(i), 2, nb_filters)
       binary_loss = CrossEntropy(binary_model, smoothing=0.1)
